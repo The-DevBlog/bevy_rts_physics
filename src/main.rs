@@ -5,9 +5,9 @@ use bevy::{
     prelude::*,
 };
 
-const BUCKETS: usize = 30;
-const CUBE_COUNT: usize = 5000;
-const BOUNDS: f32 = 200.0;
+const BUCKETS: usize = 50;
+const CUBE_COUNT: usize = 10000;
+const BOUNDS: f32 = 400.0;
 
 fn main() {
     let mut app = App::new();
@@ -91,7 +91,7 @@ fn setup(
 ) {
     let cam = (
         Camera3d::default(),
-        Transform::from_translation(Vec3::new(0.0, 150.0, 250.0)).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(Vec3::new(0.0, 550.0, 650.0)).looking_at(Vec3::ZERO, Vec3::Y),
     );
 
     let ground = (
