@@ -3,17 +3,18 @@ use bevy::{
     prelude::*,
 };
 
-const CUBE_COUNT: usize = 2000;
-const CUBE_RADIUS: f32 = 2.0;
+const CUBE_COUNT: usize = 5000;
+const BOUNDS: f32 = 200.0;
 
 fn main() {
     let mut app = App::new();
 
     app.add_plugins(DefaultPlugins)
-        .add_systems(Startup, (setup, spawn_cubes))
+        .add_systems(Startup, (setup, spawn_walls, spawn_cubes))
         .add_systems(
             Update,
             (
+                contain_in_box,
                 apply_friction,
                 move_player,
                 integrate_velocities,
@@ -36,6 +37,49 @@ struct Player;
 #[derive(Component, Deref, DerefMut)]
 struct Velocity(Vec3);
 
+fn spawn_walls(
+    mut cmds: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+) {
+    // wall thickness & height:
+    let thick = 1.0;
+    let height = 10.0;
+    let half = BOUNDS;
+
+    let mesh = Mesh3d(meshes.add(Cuboid::new(half * 2.0 + thick * 2.0, height, thick)));
+    let mesh2 = Mesh3d(meshes.add(Cuboid::new(thick, height, half * 2.0 + thick * 2.0)));
+    let mat = MeshMaterial3d(mats.add(StandardMaterial::from_color(GRAY_500)));
+
+    // +Z wall
+    cmds.spawn((
+        mesh.clone(),
+        mat.clone(),
+        Transform::from_translation(Vec3::new(0.0, height / 2.0, half + thick / 2.0)),
+    ));
+
+    // -Z wall
+    cmds.spawn((
+        mesh.clone(),
+        mat.clone(),
+        Transform::from_translation(Vec3::new(0.0, height / 2.0, -half - thick / 2.0)),
+    ));
+
+    // +X wall
+    cmds.spawn((
+        mesh2.clone(),
+        mat.clone(),
+        Transform::from_translation(Vec3::new(half + thick / 2.0, height / 2.0, 0.0)),
+    ));
+
+    // -X wall
+    cmds.spawn((
+        mesh2.clone(),
+        mat.clone(),
+        Transform::from_translation(Vec3::new(-half - thick / 2.0, height / 2.0, 0.0)),
+    ));
+}
+
 fn setup(
     mut cmds: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -47,7 +91,7 @@ fn setup(
     );
 
     let ground = (
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(200.0, 200.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(BOUNDS * 2.0, BOUNDS * 2.0))),
         MeshMaterial3d(materials.add(StandardMaterial::from_color(GREEN_600))),
     );
 
@@ -221,6 +265,40 @@ fn collision(mut q: Query<(Entity, &mut Velocity, &mut Transform, &ColliderRadiu
             v1.z = new1.y;
             v2.x = new2.x;
             v2.z = new2.y;
+        }
+    }
+}
+
+fn contain_in_box(mut q: Query<(&ColliderRadius, &mut Velocity, &mut Transform), With<Cube>>) {
+    for (rad, mut vel, mut tf) in q.iter_mut() {
+        let r = rad.0;
+        // left wall
+        if tf.translation.x < -BOUNDS + r {
+            tf.translation.x = -BOUNDS + r;
+            if vel.x < 0.0 {
+                vel.x = 0.0;
+            }
+        }
+        // right wall
+        if tf.translation.x > BOUNDS - r {
+            tf.translation.x = BOUNDS - r;
+            if vel.x > 0.0 {
+                vel.x = 0.0;
+            }
+        }
+        // back wall (positive Z)
+        if tf.translation.z > BOUNDS - r {
+            tf.translation.z = BOUNDS - r;
+            if vel.z > 0.0 {
+                vel.z = 0.0;
+            }
+        }
+        // front wall (negative Z)
+        if tf.translation.z < -BOUNDS + r {
+            tf.translation.z = -BOUNDS + r;
+            if vel.z < 0.0 {
+                vel.z = 0.0;
+            }
         }
     }
 }
