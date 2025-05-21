@@ -11,7 +11,7 @@ fn main() {
 
     app.add_plugins(DefaultPlugins)
         .add_systems(Startup, (setup, spawn_cubes))
-        .add_systems(Update, (move_player, collider_lines))
+        .add_systems(Update, (move_player, collider_lines, collision_restitution))
         .run();
 }
 
@@ -120,4 +120,36 @@ fn move_player(
     }
 
     tf.translation += direction * time.delta_secs() * 50.0;
+}
+
+fn collision_restitution(
+    mut q_player: Query<&mut Transform, With<Player>>,
+    q_cubes: Query<&Transform, (With<Cube>, Without<Player>)>,
+) {
+    let Ok(mut player_tf) = q_player.single_mut() else {
+        return;
+    };
+    let player_pos2 = Vec2::new(player_tf.translation.x, player_tf.translation.z);
+    let radius = 25.0;
+
+    for cube_tf in q_cubes.iter() {
+        let cube_pos2 = Vec2::new(cube_tf.translation.x, cube_tf.translation.z);
+        let delta = player_pos2 - cube_pos2;
+        let dist = delta.length();
+
+        // if they overlap...
+        if dist < radius * 2.0 {
+            // how far “into” the cube we are
+            let penetration = radius * 2.0 - dist;
+            // safe-guard zero-length
+            let normal = if dist > 0.0 {
+                delta / dist
+            } else {
+                Vec2::new(1.0, 0.0)
+            };
+            // push the player *out* along XZ
+            player_tf.translation.x += normal.x * penetration;
+            player_tf.translation.z += normal.y * penetration;
+        }
+    }
 }
