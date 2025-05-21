@@ -226,7 +226,7 @@ fn collision(mut q: Query<(Entity, &mut Velocity, &mut Transform, &ColliderRadiu
 }
 
 fn apply_friction(mut q: Query<&mut Velocity, With<Cube>>) {
-    let friction_factor = 0.1;
+    let friction_factor = 1.0;
     for mut v in q.iter_mut() {
         **v *= friction_factor;
     }
