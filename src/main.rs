@@ -153,7 +153,7 @@ fn spawn_cubes(
 
     // Player
     cmds.spawn((
-        cube(Vec3::new(0.0, 1.0, 150.0), 20.0, BLUE_500.into()),
+        cube(Vec3::new(0.0, 1.0, 300.0), 20.0, BLUE_500.into()),
         Player,
     ));
 }
