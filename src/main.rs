@@ -1,17 +1,29 @@
 use bevy::{
     color::palettes::{
         css::RED,
-        tailwind::{BLUE_600, GREEN_600, RED_600},
+        tailwind::{BLUE_500, GREEN_600, RED_500, YELLOW_500},
     },
     prelude::*,
 };
+
+const CUBE_COUNT: usize = 2000;
+const CUBE_RADIUS: f32 = 2.0;
 
 fn main() {
     let mut app = App::new();
 
     app.add_plugins(DefaultPlugins)
         .add_systems(Startup, (setup, spawn_cubes))
-        .add_systems(Update, (move_player, collider_lines, collision_restitution))
+        .add_systems(
+            Update,
+            (
+                apply_friction,
+                move_player,
+                integrate_velocities,
+                collider_lines,
+                collision,
+            ),
+        )
         .run();
 }
 
@@ -20,6 +32,9 @@ struct Cube;
 
 #[derive(Component)]
 struct Player;
+
+#[derive(Component, Deref, DerefMut)]
+struct Velocity(Vec3);
 
 fn setup(
     mut cmds: Commands,
@@ -65,91 +80,146 @@ fn spawn_cubes(
 ) {
     let mut cube = |pos: Vec3, clr: Color| {
         (
-            Mesh3d(meshes.add(Cuboid::new(25.0, 25.0, 25.0))),
+            Mesh3d(meshes.add(Cuboid::new(2.0, 2.0, 2.0))),
             MeshMaterial3d(materials.add(StandardMaterial::from_color(clr))),
             Transform::from_translation(pos),
             Cube,
+            Velocity(Vec3::ZERO),
         )
     };
 
-    cmds.spawn((cube(Vec3::new(40.0, 12.5, 0.0), BLUE_600.into()), Player));
-    cmds.spawn(cube(Vec3::new(-40.0, 12.5, 0.0), RED_600.into()));
+    let side = (CUBE_COUNT as f32).sqrt().ceil() as u32;
+    let spacing = 5.0;
+    let half = (side as f32 - 1.0) * spacing * 0.5;
+
+    for idx in 0..CUBE_COUNT {
+        let col = (idx as u32) % side;
+        let row = (idx as u32) / side;
+
+        let x = col as f32 * spacing - half;
+        let z = row as f32 * spacing - half;
+
+        cmds.spawn(cube(Vec3::new(x, 1.0, z), YELLOW_500.into()));
+    }
+
+    cmds.spawn((cube(Vec3::new(0.0, 1.0, 150.0), BLUE_500.into()), Player));
 }
 
 fn collider_lines(q_cube: Query<&Transform, With<Cube>>, mut gizmos: Gizmos) {
-    let radius = 25.0;
-
     for tf in q_cube.iter() {
         let mut pos: Vec3 = tf.translation;
         pos.y = 0.1;
         let rot = Quat::from_rotation_x(std::f32::consts::PI / 2.0);
         let iso = Isometry3d::new(pos, rot);
-        gizmos.circle(iso, radius, RED);
+        gizmos.circle(iso, CUBE_RADIUS, RED);
     }
 }
 
 fn move_player(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut q_player: Query<&mut Transform, With<Player>>,
+    mut query: Query<&mut Velocity, With<Player>>,
 ) {
-    let Ok(mut tf) = q_player.single_mut() else {
-        return;
-    };
+    if let Ok(mut vel) = query.single_mut() {
+        let mut dir = Vec3::ZERO;
 
-    let mut direction = Vec3::ZERO;
+        // up
+        if keys.pressed(KeyCode::KeyW) {
+            dir -= Vec3::Z;
+        }
 
-    // up
-    if keys.pressed(KeyCode::KeyW) {
-        direction -= Vec3::Z;
+        // down
+        if keys.pressed(KeyCode::KeyS) {
+            dir += Vec3::Z;
+        }
+
+        // right
+        if keys.pressed(KeyCode::KeyD) {
+            dir += Vec3::X;
+        }
+
+        // left
+        if keys.pressed(KeyCode::KeyA) {
+            dir -= Vec3::X;
+        }
+
+        **vel = dir.normalize_or_zero() * 50.0 * time.delta_secs();
     }
-
-    // down
-    if keys.pressed(KeyCode::KeyS) {
-        direction += Vec3::Z;
-    }
-
-    // right
-    if keys.pressed(KeyCode::KeyD) {
-        direction += Vec3::X;
-    }
-
-    // left
-    if keys.pressed(KeyCode::KeyA) {
-        direction -= Vec3::X;
-    }
-
-    tf.translation += direction * time.delta_secs() * 50.0;
 }
 
-fn collision_restitution(
-    mut q_player: Query<&mut Transform, With<Player>>,
-    q_cubes: Query<&Transform, (With<Cube>, Without<Player>)>,
-) {
-    let Ok(mut player_tf) = q_player.single_mut() else {
-        return;
-    };
-    let player_pos2 = Vec2::new(player_tf.translation.x, player_tf.translation.z);
-    let radius = 25.0;
+fn integrate_velocities(mut q: Query<(&Velocity, &mut Transform), With<Cube>>) {
+    for (vel, mut tf) in q.iter_mut() {
+        tf.translation += **vel;
+    }
+}
 
-    for cube_tf in q_cubes.iter() {
-        let cube_pos2 = Vec2::new(cube_tf.translation.x, cube_tf.translation.z);
-        let delta = player_pos2 - cube_pos2;
-        let dist = delta.length();
+fn collision(mut q: Query<(Entity, &mut Velocity, &mut Transform), With<Cube>>) {
+    let mass = 1.0; // all cubes have equal mass
 
-        // if they overlap...
-        if dist < radius * 2.0 {
-            // how far “into” the cube we are
-            let penetration = radius * 2.0 - dist;
-            // safe-guard zero-length
-            let normal = if dist > 0.0 {
-                delta / dist
-            } else {
-                Vec2::new(1.0, 0.0)
-            };
-            // push the player *out* along XZ
-            player_tf.translation.x += normal.x * penetration;
-            player_tf.translation.z += normal.y * penetration;
+    // 1) gather positions
+    let mut positions = Vec::new();
+    for (e, _vel, tf) in q.iter() {
+        positions.push((e, Vec2::new(tf.translation.x, tf.translation.z)));
+    }
+
+    // 2) find overlapping pairs
+    let mut overlaps = Vec::new();
+    for i in 0..positions.len() {
+        for j in (i + 1)..positions.len() {
+            let (e1, p1) = positions[i];
+            let (e2, p2) = positions[j];
+            let delta = p2 - p1;
+            let dist = delta.length();
+            if dist < 2.0 * CUBE_RADIUS {
+                let penetration = 2.0 * CUBE_RADIUS - dist;
+                let normal = if dist > 0.0 { delta / dist } else { Vec2::X };
+                overlaps.push((e1, e2, penetration, normal));
+            }
         }
+    }
+
+    // 3) for each overlap, do separation + inelastic merge
+    for (e1, e2, penetration, normal) in overlaps {
+        if let Ok(mut pair) = q.get_many_mut([e1, e2]) {
+            let slice = pair.as_mut_slice();
+            let (a, b) = slice.split_at_mut(1);
+            let (_, v1, tf1) = &mut a[0];
+            let (_, v2, tf2) = &mut b[0];
+
+            // a) separation
+            tf1.translation.x -= normal.x * penetration * 0.5;
+            tf1.translation.z -= normal.y * penetration * 0.5;
+            tf2.translation.x += normal.x * penetration * 0.5;
+            tf2.translation.z += normal.y * penetration * 0.5;
+
+            // b) compute center-of-mass velocity along the normal
+            let vel1 = Vec2::new(v1.x, v1.z);
+            let vel2 = Vec2::new(v2.x, v2.z);
+
+            let v1n = vel1.dot(normal);
+            let v2n = vel2.dot(normal);
+            let v_cm_n = (v1n * mass + v2n * mass) / (mass + mass);
+
+            // c) rebuild each body’s velocity:
+            //    - normal component = v_cm_n
+            //    - tangent component = unchanged
+            let t1 = vel1 - normal * v1n;
+            let t2 = vel2 - normal * v2n;
+
+            let new1 = t1 + normal * v_cm_n;
+            let new2 = t2 + normal * v_cm_n;
+
+            v1.x = new1.x;
+            v1.z = new1.y;
+            v2.x = new2.x;
+            v2.z = new2.y;
+        }
+    }
+}
+
+fn apply_friction(mut q: Query<&mut Velocity, With<Cube>>) {
+    let friction_factor = 0.1;
+    for mut v in q.iter_mut() {
+        **v *= friction_factor;
     }
 }
