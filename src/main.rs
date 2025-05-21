@@ -1,8 +1,11 @@
+use std::f32::consts::PI;
+
 use bevy::{
     color::palettes::{css::RED, tailwind::*},
     prelude::*,
 };
 
+const BUCKETS: usize = 30;
 const CUBE_COUNT: usize = 5000;
 const BOUNDS: f32 = 200.0;
 
@@ -20,6 +23,7 @@ fn main() {
                 integrate_velocities,
                 collider_lines,
                 collision,
+                draw_grid,
             ),
         )
         .run();
@@ -192,7 +196,7 @@ fn move_player(
             dir -= Vec3::X;
         }
 
-        **vel = dir.normalize_or_zero() * 500.0 * time.delta_secs();
+        **vel = dir.normalize_or_zero() * 200.0 * time.delta_secs();
     }
 }
 
@@ -202,35 +206,91 @@ fn integrate_velocities(mut q: Query<(&Velocity, &mut Transform), With<Cube>>) {
     }
 }
 
-// fn collision(mut q: Query<(Entity, &mut Velocity, &mut Transform, &ColliderRadius), With<Cube>>) {
+fn draw_grid(mut gizmos: Gizmos) {
+    let spacing = BOUNDS * 2.0 / BUCKETS as f32;
+
+    gizmos.grid(
+        Isometry3d::from_rotation(Quat::from_rotation_x(PI / 2.0)),
+        UVec2::new(BUCKETS as u32, BUCKETS as u32),
+        Vec2::new(spacing, spacing),
+        ORANGE_500,
+    );
+}
+
 fn collision(mut q: Query<(Entity, &mut Velocity, &mut Transform, &ColliderRadius), With<Cube>>) {
-    // 1) gather (entity, xz-pos, radius) for every cube
-    let mut data = Vec::new();
+    let cell_size = (2.0 * BOUNDS) / (BUCKETS as f32);
+
+    // 1) Build empty buckets
+    let mut buckets: Vec<Vec<(Entity, Vec2, f32)>> = vec![Vec::new(); BUCKETS * BUCKETS];
+
+    // 2) Hash each cube into a bucket
     for (e, _vel, tf, rad) in q.iter() {
-        let pos2 = Vec2::new(tf.translation.x, tf.translation.z);
-        data.push((e, pos2, rad.0));
+        let x = ((tf.translation.x + BOUNDS) / cell_size).floor() as isize;
+        let z = ((tf.translation.z + BOUNDS) / cell_size).floor() as isize;
+        let bx = x.clamp(0, BUCKETS as isize - 1) as usize;
+        let bz = z.clamp(0, BUCKETS as isize - 1) as usize;
+        let idx = bx + bz * BUCKETS;
+        buckets[idx].push((e, Vec2::new(tf.translation.x, tf.translation.z), rad.0));
     }
 
-    // 2) find overlapping pairs
+    // 3) Collect overlapping pairs by only looking in each cell + neighbors
     let mut overlaps = Vec::new();
-    for i in 0..data.len() {
-        for j in (i + 1)..data.len() {
-            let (e1, p1, r1) = data[i];
-            let (e2, p2, r2) = data[j];
-            let delta = p2 - p1;
-            let dist = delta.length();
-            let sum_r = r1 + r2;
+    for bz in 0..BUCKETS {
+        for bx in 0..BUCKETS {
+            let base_idx = bx + bz * BUCKETS;
+            let cell = &buckets[base_idx];
 
-            if dist < sum_r {
-                let penetration = sum_r - dist;
-                // safe-norm
-                let normal = if dist > 0.0 { delta / dist } else { Vec2::X };
-                overlaps.push((e1, e2, penetration, normal));
+            // Check within the same cell
+            for i in 0..cell.len() {
+                for j in (i + 1)..cell.len() {
+                    let (e1, p1, r1) = &cell[i];
+                    let (e2, p2, r2) = &cell[j];
+                    let delta = *p2 - *p1;
+                    let dist = delta.length();
+                    let sum_r = r1 + r2;
+                    if dist < sum_r {
+                        let pen = sum_r - dist;
+                        let n = if dist > 0.0 { delta / dist } else { Vec2::X };
+                        overlaps.push((*e1, *e2, pen, n));
+                    }
+                }
+            }
+
+            // Check this cell against the 8 neighbors to catch cross‐cell collisions
+            for dz in -1isize..=1 {
+                for dx in -1isize..=1 {
+                    if dz == 0 && dx == 0 {
+                        continue;
+                    }
+                    let nbx = bx as isize + dx;
+                    let nbz = bz as isize + dz;
+                    if !(0..BUCKETS as isize).contains(&nbx)
+                        || !(0..BUCKETS as isize).contains(&nbz)
+                    {
+                        continue;
+                    }
+                    let nidx = nbx as usize + nbz as usize * BUCKETS;
+                    for (e1, p1, r1) in cell {
+                        for (e2, p2, r2) in &buckets[nidx] {
+                            // avoid double‐checks
+                            if e1.index() < e2.index() {
+                                let delta = *p2 - *p1;
+                                let dist = delta.length();
+                                let sum_r = r1 + r2;
+                                if dist < sum_r {
+                                    let pen = sum_r - dist;
+                                    let n = if dist > 0.0 { delta / dist } else { Vec2::X };
+                                    overlaps.push((*e1, *e2, pen, n));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    // 3) resolve each overlap exactly as before, but using per-entity radii
+    // 4) Resolve all found overlaps (same inelastic merge as before)
     let mass = 1.0;
     for (e1, e2, penetration, normal) in overlaps {
         if let Ok(mut pair) = q.get_many_mut([e1, e2]) {
@@ -239,27 +299,23 @@ fn collision(mut q: Query<(Entity, &mut Velocity, &mut Transform, &ColliderRadiu
             let (_, v1, tf1, _) = &mut a[0];
             let (_, v2, tf2, _) = &mut b[0];
 
-            // a) separation by half-penetration
+            // separation
             tf1.translation.x -= normal.x * penetration * 0.5;
             tf1.translation.z -= normal.y * penetration * 0.5;
             tf2.translation.x += normal.x * penetration * 0.5;
             tf2.translation.z += normal.y * penetration * 0.5;
 
-            // b) inelastic merge of normal velocities
+            // inelastic normal‐merge
             let vel1 = Vec2::new(v1.x, v1.z);
             let vel2 = Vec2::new(v2.x, v2.z);
-
             let v1n = vel1.dot(normal);
             let v2n = vel2.dot(normal);
-            // center-of-mass speed along normal
-            let v_cm_n = (v1n * mass + v2n * mass) / (mass + mass);
+            let v_cm = (v1n * mass + v2n * mass) / (mass + mass);
 
-            // rebuild each velocity: keep tangent, set normal = v_cm_n
             let t1 = vel1 - normal * v1n;
             let t2 = vel2 - normal * v2n;
-
-            let new1 = t1 + normal * v_cm_n;
-            let new2 = t2 + normal * v_cm_n;
+            let new1 = t1 + normal * v_cm;
+            let new2 = t2 + normal * v_cm;
 
             v1.x = new1.x;
             v1.z = new1.y;
@@ -268,6 +324,73 @@ fn collision(mut q: Query<(Entity, &mut Velocity, &mut Transform, &ColliderRadiu
         }
     }
 }
+
+// fn collision(mut q: Query<(Entity, &mut Velocity, &mut Transform, &ColliderRadius), With<Cube>>) {
+// fn collision(mut q: Query<(Entity, &mut Velocity, &mut Transform, &ColliderRadius), With<Cube>>) {
+//     // 1) gather (entity, xz-pos, radius) for every cube
+//     let mut data = Vec::new();
+//     for (e, _vel, tf, rad) in q.iter() {
+//         let pos2 = Vec2::new(tf.translation.x, tf.translation.z);
+//         data.push((e, pos2, rad.0));
+//     }
+
+//     // 2) find overlapping pairs
+//     let mut overlaps = Vec::new();
+//     for i in 0..data.len() {
+//         for j in (i + 1)..data.len() {
+//             let (e1, p1, r1) = data[i];
+//             let (e2, p2, r2) = data[j];
+//             let delta = p2 - p1;
+//             let dist = delta.length();
+//             let sum_r = r1 + r2;
+
+//             if dist < sum_r {
+//                 let penetration = sum_r - dist;
+//                 // safe-norm
+//                 let normal = if dist > 0.0 { delta / dist } else { Vec2::X };
+//                 overlaps.push((e1, e2, penetration, normal));
+//             }
+//         }
+//     }
+
+//     // 3) resolve each overlap exactly as before, but using per-entity radii
+//     let mass = 1.0;
+//     for (e1, e2, penetration, normal) in overlaps {
+//         if let Ok(mut pair) = q.get_many_mut([e1, e2]) {
+//             let slice = pair.as_mut_slice();
+//             let (a, b) = slice.split_at_mut(1);
+//             let (_, v1, tf1, _) = &mut a[0];
+//             let (_, v2, tf2, _) = &mut b[0];
+
+//             // a) separation by half-penetration
+//             tf1.translation.x -= normal.x * penetration * 0.5;
+//             tf1.translation.z -= normal.y * penetration * 0.5;
+//             tf2.translation.x += normal.x * penetration * 0.5;
+//             tf2.translation.z += normal.y * penetration * 0.5;
+
+//             // b) inelastic merge of normal velocities
+//             let vel1 = Vec2::new(v1.x, v1.z);
+//             let vel2 = Vec2::new(v2.x, v2.z);
+
+//             let v1n = vel1.dot(normal);
+//             let v2n = vel2.dot(normal);
+//             // center-of-mass speed along normal
+//             let v_cm_n = (v1n * mass + v2n * mass) / (mass + mass);
+
+//             // rebuild each velocity: keep tangent, set normal = v_cm_n
+//             let t1 = vel1 - normal * v1n;
+//             let t2 = vel2 - normal * v2n;
+
+//             let new1 = t1 + normal * v_cm_n;
+//             let new2 = t2 + normal * v_cm_n;
+
+//             v1.x = new1.x;
+//             v1.z = new1.y;
+//             v2.x = new2.x;
+//             v2.z = new2.y;
+//         }
+//     }
+// }
 
 fn contain_in_box(mut q: Query<(&ColliderRadius, &mut Velocity, &mut Transform), With<Cube>>) {
     for (rad, mut vel, mut tf) in q.iter_mut() {
